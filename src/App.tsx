@@ -5,7 +5,7 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import axios from "axios";
-import { analyzeAlert, AnalysisResponse } from "./ai_agent";
+import { analyzeAlert } from "./ai_agent";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 import { auth, loginWithGoogle, db } from "./firebase";
@@ -36,6 +36,7 @@ export default function App() {
   const [showDeploymentGuide, setShowDeploymentGuide] = useState(false);
   const [agents, setAgents] = useState<any[]>([]);
 
+  // 1. Auth Observer
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (u) => {
       setUser(u);
@@ -45,14 +46,15 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
+  // 2. Data Polling Loop (Only run if user & settings are ready)
   useEffect(() => {
-    if (user && settings.wazuhUrl) {
-      fetchAlerts();
-      fetchAgents();
-      const interval = setInterval(() => {
-        fetchAlerts();
-        fetchAgents();
-      }, 10000);
+    if (user && settings.wazuhUrl && settings.wazuhIndexerUrl) {
+      const runPoll = async () => {
+        await fetchAlerts();
+        await fetchAgents();
+      };
+      runPoll();
+      const interval = setInterval(runPoll, 10000);
       return () => clearInterval(interval);
     }
   }, [user, settings]);
@@ -67,9 +69,8 @@ export default function App() {
       if (docSnap.exists()) {
         const data = docSnap.data() as AppSettings;
         setSettings(prev => ({ ...prev, ...data }));
-        axios.post("/api/config", data).catch(()=>{});
       }
-    } catch (err) { console.error(err); }
+    } catch (err) { console.error("Load Settings Error:", err); }
   };
 
   const saveSettings = async () => {
@@ -78,26 +79,28 @@ export default function App() {
       await setDoc(doc(db, "users", user.uid, "settings", "main"), {
         ...settings, updatedAt: new Date().toISOString(), updatedBy: user.uid
       });
-      await axios.post("/api/config", settings);
-      addLog("[SYSTEM] Settings saved and synced with Agent.");
+      addLog("[SYSTEM] Configuration synced to Cloud Vault.");
       setShowSettings(false);
-    } catch (err) { console.error(err); }
+    } catch (err) { addLog("[ERROR] Gagal menyimpan konfigurasi."); }
   };
 
   const checkConnection = async () => {
     setIsCheckingConnection(true);
-    addLog("[SYSTEM] Testing SIEM connectivity...");
+    addLog("[SYSTEM] Testing SIEM Manager connectivity (Port 55000)...");
     try {
       const response = await axios.post("/api/config/test", settings);
       if (response.data.status === "success") addLog(`[SUCCESS] Connected to Wazuh Manager.`);
-      else addLog(`[ERROR] ${response.data.message}`);
-    } catch (err: any) { addLog(`[ERROR] SIEM unreachable: ${err.message}`); } 
+      else addLog(`[ERROR] Auth Failed: ${response.data.message}`);
+    } catch (err: any) { addLog(`[ERROR] Manager Unreachable: ${err.message}`); } 
     finally { setIsCheckingConnection(false); }
   };
 
   const fetchAgents = async () => {
+    if (!user) return;
     try {
-      const response = await axios.post("/api/agents", settings);
+      const response = await axios.post("/api/agents", settings, {
+        headers: { 'x-user-id': user.uid }
+      });
       if (Array.isArray(response.data)) setAgents(response.data);
     } catch (err) {}
   };
@@ -105,26 +108,28 @@ export default function App() {
   const fetchAlerts = async () => {
     if (!user || !settings.wazuhIndexerUrl) return;
     try {
-      // 1. Ambil data dari Wazuh Indexer via Backend Proxy
-      const wazuhRes = await axios.post("/api/alerts", settings);
+      // Step A: Fetch Live Data via Vercel Proxy
+      const wazuhRes = await axios.post("/api/alerts", settings, {
+        headers: { 'x-user-id': user.uid }
+      });
       
       if (wazuhRes.data === null) {
-        addLog("[ERROR] Indexer Unreachable. Periksa IP, Port 9200, dan Firewall.");
+        addLog("[ERROR] Indexer (9200) Unreachable. Cek Firewall/Password.");
         return;
       }
 
       const liveAlerts = Array.isArray(wazuhRes.data) ? wazuhRes.data : [];
       
-      // 2. Simpan live alert ke Firestore satu per satu (Sinkronisasi)
+      // Step B: Sinkronisasi ke Firestore (Biar data persist & stateless)
       if (liveAlerts.length > 0) {
         for (const alert of liveAlerts) {
           const alertRef = doc(db, "wazuh_alerts", alert.id);
           await setDoc(alertRef, { ...alert, userId: user.uid }, { merge: true });
         }
-        addLog(`[SUCCESS] Sinkronisasi: ${liveAlerts.length} alert baru dari Wazuh.`);
+        addLog(`[SUCCESS] Sync: ${liveAlerts.length} alert baru dari Indexer.`);
       }
 
-      // 3. Tarik semua data dari Firestore milik user ini
+      // Step C: Load History dari Firestore (Multi-tenant isolation)
       const q = query(collection(db, "wazuh_alerts"), where("userId", "==", user.uid));
       const snap = await getDocs(q);
       const dbAlerts = snap.docs.map(d => d.data())
@@ -133,53 +138,37 @@ export default function App() {
       
       setAlerts(dbAlerts);
     } catch (err: any) {
-      addLog(`[ERROR] Fetch Indexer: ${err.response?.status || "Unknown Error"}`);
+      addLog(`[ERROR] Alert Sync: ${err.response?.status || "Network Error"}`);
     }
-  };
-
-  const logToFirestore = async (alertId: string, action: string, reasoning: string) => {
-    if (!user) return;
-    try {
-      await addDoc(collection(db, "audit_logs"), {
-        alertId, action, reasoning, timestamp: serverTimestamp(), actor: user.uid
-      });
-    } catch (err) {}
   };
 
   const runAnalysis = async (alert: any) => {
     if (alert.analysis || !user) return;
     setIsAnalyzing(true);
-    addLog(`[AGENT] Memulai analisis otonom untuk ${alert.id}...`);
+    addLog(`[AGENT] Starting autonomous analysis for ${alert.id}...`);
     try {
       const result = await analyzeAlert(alert.raw_log);
       await setDoc(doc(db, "wazuh_alerts", alert.id), { status: "Analyzed", analysis: result }, { merge: true });
-      addLog(`[AGENT] Analisis selesai. Severity: ${result.severity}`);
-      await logToFirestore(alert.id, "AI_ANALYSIS", result.summary);
+      addLog(`[AGENT] Analisis selesai. Level: ${result.severity}`);
       fetchAlerts();
       setSelectedAlert((prev: any) => prev?.id === alert.id ? { ...prev, status: "Analyzed", analysis: result } : prev);
-    } catch (err) {
-      addLog(`[ERROR] AI Reasoning gagal.`);
-    } finally {
-      setIsAnalyzing(false);
-    }
+    } catch (err) { addLog(`[ERROR] AI Engine timeout.`); } 
+    finally { setIsAnalyzing(false); }
   };
 
   const sendTelegramReport = async (alert: any) => {
     if (!alert.analysis) return;
-    addLog(`[SOC] Mengirim laporan ke Telegram...`);
+    addLog(`[SOC] Dispatching report to Telegram channel...`);
     try {
       await axios.post(`/api/alerts/report`, { config: settings, alert });
-      addLog(`[SUCCESS] Laporan Telegram terkirim.`);
-    } catch (err: any) {
-      addLog(`[ERROR] Gagal kirim Telegram.`);
-    }
+      addLog(`[SUCCESS] Dispatch confirmed.`);
+    } catch (err: any) { addLog(`[ERROR] Telegram API rejected request.`); }
   };
 
   const handleResolve = async (id: string) => {
     try {
       await setDoc(doc(db, "wazuh_alerts", id), { status: "Resolved" }, { merge: true });
-      addLog(`[SOC] Alert ${id} ditandai RESOLVED.`);
-      await logToFirestore(id, "RESOLVE", "Incident resolved manually.");
+      addLog(`[SOC] Alert ${id} RESOLVED.`);
       fetchAlerts();
       setSelectedAlert(null);
     } catch (err) {}
@@ -190,10 +179,10 @@ export default function App() {
   if (!user) {
     return (
       <div className="min-h-screen bg-[#0B0F1A] flex items-center justify-center p-6 grid-bg">
-        <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} className="max-w-md w-full bg-[#131B2D] border-panel rounded-2xl p-8 text-center shadow-2xl">
+        <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} className="max-w-md w-full bg-[#131B2D] border-panel rounded-2xl p-8 text-center">
           <div className="w-16 h-16 bg-blue-600 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-lg shadow-blue-600/20"><Shield className="w-8 h-8 text-white" /></div>
-          <h1 className="text-2xl font-bold text-white mb-2 uppercase tracking-tight italic font-serif">MusiCyber AI Agent</h1>
-          <p className="text-slate-400 text-sm mb-8">Autonomous Security Incident Response Orchestrator.</p>
+          <h1 className="text-2xl font-bold text-white mb-2 uppercase italic font-serif tracking-tight">MusiCyber AI Agent</h1>
+          <p className="text-slate-400 text-sm mb-8 italic">Independent Cybersecurity Orchestrator</p>
           <button onClick={loginWithGoogle} className="w-full py-4 bg-white text-[#0B0F1A] font-bold rounded-xl flex items-center justify-center gap-3 hover:bg-slate-100 transition-all active:scale-[0.98]">
             <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/nps/google.svg" className="w-5 h-5" alt="Google" /> Sign in with Google
           </button>
@@ -207,15 +196,15 @@ export default function App() {
       <header className="h-16 border-b border-white/10 bg-[#0B0F1A]/80 backdrop-blur-md flex items-center justify-between px-6 z-10 shrink-0">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 bg-blue-600 rounded flex items-center justify-center shadow-lg shadow-blue-600/20"><Shield className="w-5 h-5 text-white" /></div>
-          <h1 className="text-lg font-bold tracking-tight text-white uppercase">MusiCyber <span className="text-blue-400">SOC AI</span></h1>
+          <h1 className="text-lg font-bold text-white uppercase">MusiCyber <span className="text-blue-400">SOC AI</span></h1>
         </div>
         <div className="flex items-center gap-6 text-[10px] font-medium uppercase tracking-widest">
           <div className="hidden lg:flex items-center gap-4 text-slate-500">
-            <span>Wazuh: <span className={cn(settings.wazuhUrl ? "text-green-500" : "text-amber-500")}>{settings.wazuhUrl ? "Active" : "Wait"}</span></span>
+            <span>SIEM: <span className={cn(settings.wazuhUrl ? "text-green-500" : "text-amber-500")}>{settings.wazuhUrl ? "CONNECTED" : "AWAITING"}</span></span>
             <div className="h-3 w-[1px] bg-white/10"></div>
-            <span>Telegram: <span className={cn(settings.telegramToken ? "text-green-500" : "text-amber-500")}>{settings.telegramToken ? "Online" : "Offline"}</span></span>
+            <span>Bot: <span className={cn(settings.telegramToken ? "text-green-500" : "text-amber-500")}>{settings.telegramToken ? "ONLINE" : "OFFLINE"}</span></span>
             <div className="h-3 w-[1px] bg-white/10"></div>
-            <span>Auth: <span className="text-blue-400">{user.email?.split("@")[0]}</span></span>
+            <span className="text-blue-400">{user.email?.split("@")[0]}</span>
           </div>
           <div className="flex items-center gap-4 text-blue-400">
             <button onClick={() => setShowSettings(true)} className="p-2 hover:bg-white/5 rounded-full"><SettingsIcon size={16} /></button>
@@ -225,19 +214,26 @@ export default function App() {
       </header>
 
       <main className="flex-1 grid grid-cols-12 gap-4 p-4 overflow-hidden">
+        {/* Left Col */}
         <section className="col-span-3 space-y-4 flex flex-col overflow-hidden">
           <div className="border-panel bg-[#131B2D] p-4 rounded-lg shrink-0">
             <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4">Security Metrics</h3>
             <div className="grid grid-cols-2 gap-3 mb-6">
-              <div className="p-3 bg-slate-900/50 rounded border border-white/5"><p className="text-[9px] text-slate-500 uppercase mb-1">Total Signals</p><p className="text-xl font-bold text-white font-mono">{alerts.length}</p></div>
-              <div className="p-3 bg-slate-900/50 rounded border border-white/5"><p className="text-[9px] text-slate-500 uppercase mb-1">AI Verified</p><p className="text-xl font-bold text-blue-400 font-mono">{alerts.filter(a => a.status === "Analyzed").length}</p></div>
+              <div className="p-3 bg-slate-900/50 rounded border border-white/5">
+                <p className="text-[9px] text-slate-500 uppercase mb-1">Total Signals</p>
+                <p className="text-xl font-bold text-white font-mono">{alerts.length}</p>
+              </div>
+              <div className="p-3 bg-slate-900/50 rounded border border-white/5">
+                <p className="text-[9px] text-slate-500 uppercase mb-1">AI Verified</p>
+                <p className="text-xl font-bold text-blue-400 font-mono">{alerts.filter(a => a.status === "Analyzed").length}</p>
+              </div>
             </div>
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Active Assets ({agents.length})</h3>
               <button onClick={() => setShowDeploymentGuide(true)} className="text-[9px] bg-blue-600/20 text-blue-400 px-2 py-1 rounded hover:bg-blue-600/40 font-bold uppercase">+ Deploy</button>
             </div>
             <div className="space-y-1 max-h-40 overflow-y-auto custom-scrollbar">
-              {agents.length === 0 ? <p className="text-[10px] text-slate-600 italic">No agents connected.</p> : agents.map(agent => (
+              {agents.length === 0 ? <p className="text-[10px] text-slate-600 italic">No heartbeats detected.</p> : agents.map(agent => (
                 <div key={agent.id} className="flex items-center justify-between p-2 bg-white/5 rounded text-[10px]">
                   <div className="flex items-center gap-2"><div className={cn("w-1.5 h-1.5 rounded-full", agent.status === "active" ? "bg-green-500" : "bg-red-500")} /><span className="text-slate-300 font-mono">{agent.name}</span></div>
                   <span className="text-slate-500">{agent.ip}</span>
@@ -258,6 +254,7 @@ export default function App() {
           </div>
         </section>
 
+        {/* Center Col */}
         <section className="col-span-6 overflow-hidden">
           <div className="border-panel bg-[#131B2D] rounded-lg p-6 h-full flex flex-col overflow-hidden relative">
             {selectedAlert ? (
@@ -276,7 +273,7 @@ export default function App() {
                             <button onClick={() => sendTelegramReport(selectedAlert)} className="text-xs text-blue-400 hover:text-white flex items-center gap-1 uppercase font-bold"><ExternalLink size={12} /> Telegram Report</button>
                           </div>
                           <div className="mb-6 text-slate-400 p-4 bg-white/5 rounded border border-white/5">
-                            <p className="text-green-400 mb-2 uppercase font-bold text-[9px] tracking-[0.2em] underline">Root Cause Analysis</p>
+                            <p className="text-green-400 mb-2 uppercase font-bold text-[9px] tracking-[0.2em] underline font-sans">Root Cause Analysis</p>
                             <p className="text-slate-200 text-sm font-serif italic mb-4 leading-relaxed">"{selectedAlert.analysis.summary}"</p>
                             <div className="grid grid-cols-2 gap-4">
                               <div><p className="text-[9px] text-slate-500 uppercase font-bold mb-1">MITRE Technique</p><p className="text-blue-400 font-bold">{selectedAlert.analysis.mitre_attack}</p></div>
@@ -297,7 +294,7 @@ export default function App() {
                   </div>
                   <div className="mt-6 flex gap-3 shrink-0">
                     <button onClick={() => !selectedAlert.analysis && runAnalysis(selectedAlert)} disabled={isAnalyzing || !!selectedAlert.analysis} className={cn("flex-1 py-4 font-bold text-[10px] uppercase tracking-widest rounded-xl transition-all shadow-xl", selectedAlert.analysis ? "bg-slate-800 text-slate-500" : "bg-blue-600 text-white hover:bg-blue-500 shadow-blue-600/20")}>
-                      {isAnalyzing ? "Processing Reasoning Path..." : selectedAlert.analysis ? "Analysis Stored" : "Run AI Analysis"}
+                      {isAnalyzing ? "Orchestrating Logic Gates..." : selectedAlert.analysis ? "Analysis Finalized" : "Execute AI Reasoning"}
                     </button>
                     {selectedAlert.status !== "Resolved" && (
                       <button onClick={() => handleResolve(selectedAlert.id)} className="px-6 py-4 bg-red-600 text-white font-bold text-[10px] uppercase rounded-xl hover:bg-red-500 transition-all shadow-xl shadow-red-600/20">Resolve</button>
@@ -315,6 +312,7 @@ export default function App() {
           </div>
         </section>
 
+        {/* Right Col */}
         <section className="col-span-3 space-y-4 flex flex-col overflow-hidden">
           <div className="border-panel bg-[#131B2D] flex-1 rounded-lg flex flex-col overflow-hidden shadow-2xl">
             <div className="p-4 border-b border-white/10 flex items-center justify-between bg-slate-900/50">
@@ -341,40 +339,76 @@ export default function App() {
         </section>
       </main>
 
+      {/* Settings Modal (ROBUST VERSION) */}
       <AnimatePresence>
         {showSettings && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-[#0B0F1A]/80 backdrop-blur-sm">
-            <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }} className="w-full max-w-2xl bg-[#131B2D] border border-white/10 rounded-2xl overflow-hidden shadow-2xl flex flex-col max-h-[80vh]">
+            <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }} className="w-full max-w-2xl bg-[#131B2D] border border-white/10 rounded-2xl overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
               <div className="p-6 border-b border-white/10 flex justify-between items-center bg-slate-900/50">
                 <div className="flex items-center gap-3"><SettingsIcon className="text-blue-500" size={20} /><h2 className="text-xl font-bold text-white uppercase tracking-tight">Agent Configuration</h2></div>
                 <button onClick={() => setShowSettings(false)} className="text-slate-500 hover:text-white"><LogOut size={20} className="rotate-180" /></button>
               </div>
               <div className="p-8 overflow-y-auto custom-scrollbar space-y-8">
+                {/* SIEM API (PORT 55000) */}
                 <section className="space-y-4">
-                  <div className="flex items-center justify-between gap-2 text-blue-400 font-bold uppercase text-[10px] tracking-widest"><div className="flex items-center gap-2"><Activity size={14} /> SIEM API</div><button onClick={checkConnection} disabled={isCheckingConnection || !settings.wazuhUrl} className="bg-blue-600/20 text-blue-400 px-3 py-1 rounded hover:bg-blue-600/40">Test Connection</button></div>
-                  <div className="space-y-1.5"><label className="text-[10px] uppercase text-slate-500 font-bold">Manager URL (55000)</label><input className="w-full bg-slate-900/80 border border-white/10 rounded-lg p-3 text-sm focus:border-blue-500" value={settings.wazuhUrl} onChange={(e) => setSettings({...settings, wazuhUrl: e.target.value})}/></div>
-                </section>
-                <section className="space-y-4">
-                  <div className="flex items-center gap-2 text-blue-400 font-bold uppercase text-[10px] tracking-widest"><History size={14} /> Indexer (9200)</div>
-                  <div className="grid grid-cols-1 gap-4">
-                    <div className="space-y-1.5"><label className="text-[10px] uppercase text-slate-500 font-bold">Indexer URL</label><input className="w-full bg-slate-900/80 border border-white/10 rounded-lg p-3 text-sm focus:border-blue-500" value={settings.wazuhIndexerUrl} onChange={(e) => setSettings({...settings, wazuhIndexerUrl: e.target.value})}/></div>
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-1.5"><label className="text-[10px] uppercase text-slate-500 font-bold">User</label><input className="w-full bg-slate-900/80 border border-white/10 rounded-lg p-3 text-sm focus:border-blue-500" value={settings.wazuhIndexerUser} onChange={(e) => setSettings({...settings, wazuhIndexerUser: e.target.value})}/></div>
-                      <div className="space-y-1.5"><label className="text-[10px] uppercase text-slate-500 font-bold">Password</label><input type="password" className="w-full bg-slate-900/80 border border-white/10 rounded-lg p-3 text-sm focus:border-blue-500" value={settings.wazuhIndexerPass} onChange={(e) => setSettings({...settings, wazuhIndexerPass: e.target.value})}/></div>
-                    </div>
+                  <div className="flex items-center justify-between gap-2 text-blue-400 font-bold uppercase text-[10px] tracking-widest"><div className="flex items-center gap-2"><Activity size={14} /> SIEM Management (Port 55000)</div><button onClick={checkConnection} disabled={isCheckingConnection || !settings.wazuhUrl} className="bg-blue-600/20 text-blue-400 px-3 py-1 rounded hover:bg-blue-600/40">{isCheckingConnection ? "Testing..." : "Test Connection"}</button></div>
+                  <div className="space-y-1.5"><label className="text-[10px] uppercase text-slate-500 font-bold ml-1">Manager URL</label><input className="w-full bg-slate-900/80 border border-white/10 rounded-lg p-3 text-sm focus:border-blue-500 transition-all font-mono" placeholder="https://34.101.88.182:55000" value={settings.wazuhUrl} onChange={(e) => setSettings({...settings, wazuhUrl: e.target.value})}/></div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1.5"><label className="text-[10px] uppercase text-slate-500 font-bold ml-1">API User</label><input className="w-full bg-slate-900/80 border border-white/10 rounded-lg p-3 text-sm focus:border-blue-500 transition-all font-mono" placeholder="wazuh-user" value={settings.wazuhUser} onChange={(e) => setSettings({...settings, wazuhUser: e.target.value})}/></div>
+                    <div className="space-y-1.5"><label className="text-[10px] uppercase text-slate-500 font-bold ml-1">API Password</label><input type="password" className="w-full bg-slate-900/80 border border-white/10 rounded-lg p-3 text-sm focus:border-blue-500 transition-all font-mono" value={settings.wazuhPass} onChange={(e) => setSettings({...settings, wazuhPass: e.target.value})}/></div>
                   </div>
                 </section>
+
+                <div className="h-[1px] bg-white/5" />
+
+                {/* INDEXER (PORT 9200) */}
                 <section className="space-y-4">
-                  <div className="flex items-center justify-between gap-2 text-blue-400 font-bold uppercase text-[10px] tracking-widest"><div className="flex items-center gap-2"><Send size={14} /> Telegram</div><button onClick={async () => { try { await axios.post("/api/config/test/telegram", { token: settings.telegramToken, chatId: settings.telegramChatId }); addLog("[SUCCESS] Telegram Test Sent"); } catch(err) { addLog("[ERROR] Telegram Test Gagal"); } }} className="bg-blue-600/20 text-blue-400 px-3 py-1 rounded hover:bg-blue-600/40">Test Bot</button></div>
+                  <div className="flex items-center gap-2 text-blue-400 font-bold uppercase text-[10px] tracking-widest"><History size={14} /> Data Indexer (Port 9200)</div>
+                  <div className="space-y-1.5"><label className="text-[10px] uppercase text-slate-500 font-bold ml-1">Indexer URL</label><input className="w-full bg-slate-900/80 border border-white/10 rounded-lg p-3 text-sm focus:border-blue-500 transition-all font-mono" placeholder="https://34.101.88.182:9200" value={settings.wazuhIndexerUrl} onChange={(e) => setSettings({...settings, wazuhIndexerUrl: e.target.value})}/></div>
                   <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-1.5"><label className="text-[10px] uppercase text-slate-500 font-bold">Bot Token</label><input className="w-full bg-slate-900/80 border border-white/10 rounded-lg p-3 text-sm focus:border-blue-500" value={settings.telegramToken} onChange={(e) => setSettings({...settings, telegramToken: e.target.value})}/></div>
-                    <div className="space-y-1.5"><label className="text-[10px] uppercase text-slate-500 font-bold">Chat ID</label><input className="w-full bg-slate-900/80 border border-white/10 rounded-lg p-3 text-sm focus:border-blue-500" value={settings.telegramChatId} onChange={(e) => setSettings({...settings, telegramChatId: e.target.value})}/></div>
+                    <div className="space-y-1.5"><label className="text-[10px] uppercase text-slate-500 font-bold ml-1">Indexer User</label><input className="w-full bg-slate-900/80 border border-white/10 rounded-lg p-3 text-sm focus:border-blue-500 transition-all font-mono" value={settings.wazuhIndexerUser} onChange={(e) => setSettings({...settings, wazuhIndexerUser: e.target.value})}/></div>
+                    <div className="space-y-1.5"><label className="text-[10px] uppercase text-slate-500 font-bold ml-1">Indexer Password</label><input type="password" className="w-full bg-slate-900/80 border border-white/10 rounded-lg p-3 text-sm focus:border-blue-500 transition-all font-mono" value={settings.wazuhIndexerPass} onChange={(e) => setSettings({...settings, wazuhIndexerPass: e.target.value})}/></div>
+                  </div>
+                </section>
+
+                <div className="h-[1px] bg-white/5" />
+
+                {/* TELEGRAM */}
+                <section className="space-y-4">
+                  <div className="flex items-center justify-between gap-2 text-blue-400 font-bold uppercase text-[10px] tracking-widest"><div className="flex items-center gap-2"><Send size={14} /> Telegram Integration</div><button onClick={async () => { try { await axios.post("/api/config/test/telegram", { token: settings.telegramToken, chatId: settings.telegramChatId }); addLog("[SUCCESS] Test Telegram dikirim."); } catch(err) { addLog("[ERROR] Gagal kirim Telegram."); } }} className="bg-blue-600/20 text-blue-400 px-3 py-1 rounded hover:bg-blue-600/40">Test Bot</button></div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1.5"><label className="text-[10px] uppercase text-slate-500 font-bold ml-1">Bot Token</label><input className="w-full bg-slate-900/80 border border-white/10 rounded-lg p-3 text-sm focus:border-blue-500 transition-all font-mono" value={settings.telegramToken} onChange={(e) => setSettings({...settings, telegramToken: e.target.value})}/></div>
+                    <div className="space-y-1.5"><label className="text-[10px] uppercase text-slate-500 font-bold ml-1">Chat ID</label><input className="w-full bg-slate-900/80 border border-white/10 rounded-lg p-3 text-sm focus:border-blue-500 transition-all font-mono" value={settings.telegramChatId} onChange={(e) => setSettings({...settings, telegramChatId: e.target.value})}/></div>
                   </div>
                 </section>
               </div>
               <div className="p-6 border-t border-white/10 flex gap-4 bg-slate-900/50">
-                <button onClick={saveSettings} className="flex-1 py-3 bg-blue-600 text-white font-bold text-xs uppercase rounded-xl hover:bg-blue-500">Confirm & Sync</button>
-                <button onClick={() => setShowSettings(false)} className="px-8 py-3 bg-slate-700 text-white font-bold text-xs uppercase rounded-xl hover:bg-slate-600">Cancel</button>
+                <button onClick={saveSettings} className="flex-1 py-3 bg-blue-600 text-white font-bold text-xs uppercase tracking-widest rounded-xl hover:bg-blue-500 transition-all shadow-lg shadow-blue-600/20">Confirm and Sync</button>
+                <button onClick={() => setShowSettings(false)} className="px-8 py-3 bg-slate-700 text-white font-bold text-xs uppercase tracking-widest rounded-xl hover:bg-slate-600 transition-all">Cancel</button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showDeploymentGuide && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-6 bg-[#0B0F1A]/90 backdrop-blur-md">
+            <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }} className="w-full max-w-xl bg-[#131B2D] border border-white/10 rounded-2xl overflow-hidden shadow-2xl flex flex-col">
+              <div className="p-6 border-b border-white/10 flex justify-between items-center bg-slate-900/50">
+                <div className="flex items-center gap-3"><Terminal className="text-blue-500" size={20} /><h2 className="text-xl font-bold text-white uppercase tracking-tight">Deploy Wazuh Agent</h2></div>
+                <button onClick={() => setShowDeploymentGuide(false)} className="text-slate-500 hover:text-white"><LogOut size={20} className="rotate-180" /></button>
+              </div>
+              <div className="p-8 space-y-6">
+                <div className="p-4 bg-slate-950 rounded-lg border border-white/5 font-mono text-[10px]">
+                  <p className="text-blue-400 mb-2 uppercase font-bold tracking-widest">// Quick Install (Linux)</p>
+                  <code className="text-slate-300 break-all leading-relaxed">
+                    wget https://packages.wazuh.com/4.x/apt/pool/main/w/wazuh-agent/wazuh-agent_4.7.2-1_amd64.deb && sudo WAZUH_MANAGER='{settings.wazuhUrl.replace(/https?:\/\//, "").replace(/:55000/, "")}' dpkg -i wazuh-agent_4.7.2-1_amd64.deb && sudo systemctl start wazuh-agent
+                  </code>
+                </div>
+              </div>
+              <div className="p-6 border-t border-white/10 flex bg-slate-900/50">
+                <button onClick={() => setShowDeploymentGuide(false)} className="flex-1 py-3 bg-blue-600 text-white font-bold text-xs uppercase tracking-widest rounded-xl hover:bg-blue-500 transition-all font-mono">Heartbeat Listener Active_</button>
               </div>
             </motion.div>
           </div>
