@@ -3,13 +3,9 @@ import { Shield, Activity, Search, Bot, RefreshCw, LogOut, Send, Settings as Set
 import { motion, AnimatePresence } from "motion/react";
 import axios from "axios";
 import { analyzeAlert } from "./ai_agent";
-import { clsx, type ClassValue } from "clsx";
-import { twMerge } from "tailwind-merge";
 import { auth, loginWithGoogle, db } from "./firebase";
 import { onAuthStateChanged, User as FirebaseUser, signOut } from "firebase/auth";
 import { doc, getDoc, setDoc, collection, query, where, getDocs } from "firebase/firestore";
-
-function cn(...inputs: ClassValue[]) { return twMerge(clsx(inputs)); }
 
 interface AppSettings {
   wazuhUrl: string; wazuhUser: string; wazuhPass: string; wazuhIndexerUrl: string;
@@ -19,11 +15,10 @@ interface AppSettings {
 
 export default function App() {
   const [user, setUser] = useState<FirebaseUser | null>(null);
-  const [authLoading, setAuthLoading] = useState(true);
   const [alerts, setAlerts] = useState<any[]>([]);
   const [selectedAlert, setSelectedAlert] = useState<any | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [logs, setLogs] = useState<string[]>(["[SYSTEM] SOC Dashboard initialized."]);
+  const [logs, setLogs] = useState<string[]>(["[SYSTEM] Dashboard initialized."]);
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState<AppSettings>({
     wazuhUrl: "", wazuhUser: "", wazuhPass: "", wazuhIndexerUrl: "",
@@ -34,7 +29,6 @@ export default function App() {
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (u) => {
       setUser(u);
-      setAuthLoading(false);
       if (u) loadUserSettings(u.uid);
     });
     return () => unsubscribe();
@@ -42,14 +36,12 @@ export default function App() {
 
   useEffect(() => {
     if (user && settings.wazuhUrl && settings.wazuhIndexerUrl) {
-      const runPoll = async () => { await fetchAlerts(); await fetchAgents(); };
-      runPoll();
-      const interval = setInterval(runPoll, 15000);
+      const poll = async () => { await fetchAlerts(); await fetchAgents(); };
+      poll();
+      const interval = setInterval(poll, 15000);
       return () => clearInterval(interval);
     }
   }, [user, settings]);
-
-  const addLog = (msg: string) => setLogs(p => [...p.slice(-10), `${new Date().toLocaleTimeString()} ${msg}`]);
 
   const loadUserSettings = async (uid: string) => {
     const snap = await getDoc(doc(db, "users", uid, "settings", "main"));
@@ -69,7 +61,7 @@ export default function App() {
       const res = await axios.post("/api/alerts", settings);
       const liveAlerts = Array.isArray(res.data) ? res.data : [];
       
-      // Frontend menyimpan ke Firestore (Menghindari Permission Denied di Backend)
+      // Simpan ke Firestore dari Frontend untuk menghindari permission denied di Backend
       for (const alert of liveAlerts) {
         await setDoc(doc(db, "wazuh_alerts", alert.id), { ...alert, userId: user.uid }, { merge: true });
       }
@@ -77,106 +69,62 @@ export default function App() {
       const q = query(collection(db, "wazuh_alerts"), where("userId", "==", user.uid));
       const snap = await getDocs(q);
       setAlerts(snap.docs.map(d => d.data()).sort((a,b) => b.timestamp.localeCompare(a.timestamp)).slice(0, 50));
-    } catch (err: any) { addLog(`[ERROR] Alert Sync: ${err.response?.status || "404/Network"}`); }
+    } catch (err: any) { 
+        setLogs(p => [...p, `[ERROR] Sync failed: ${err.response?.status || "Check Connection"}`]);
+    }
   };
-
-  const runAnalysis = async (alert: any) => {
-    if (alert.analysis || !user) return;
-    setIsAnalyzing(true);
-    try {
-      const result = await analyzeAlert(alert.raw_log);
-      await setDoc(doc(db, "wazuh_alerts", alert.id), { status: "Analyzed", analysis: result }, { merge: true });
-      addLog(`[AGENT] Analisis selesai.`);
-      fetchAlerts();
-    } catch (err) { addLog(`[ERROR] AI Engine timeout.`); } 
-    finally { setIsAnalyzing(false); }
-  };
-
-  if (authLoading) return <div className="min-h-screen bg-[#0B0F1A] flex items-center justify-center"><RefreshCw className="text-blue-500 animate-spin"/></div>;
 
   if (!user) return (
-    <div className="min-h-screen bg-[#0B0F1A] flex items-center justify-center p-6">
-      <div className="max-w-md w-full bg-[#131B2D] border border-white/10 rounded-2xl p-8 text-center">
-        <Shield className="w-16 h-16 text-blue-600 mx-auto mb-6"/>
-        <h1 className="text-2xl font-bold text-white mb-8">MusiCyber SOC AI</h1>
-        <button onClick={loginWithGoogle} className="w-full py-4 bg-white text-black font-bold rounded-xl flex items-center justify-center gap-3">
-          Sign in with Google
-        </button>
-      </div>
+    <div className="min-h-screen bg-[#0B0F1A] flex items-center justify-center">
+      <button onClick={loginWithGoogle} className="py-4 px-8 bg-white text-black font-bold rounded-xl">Sign in with Google</button>
     </div>
   );
 
   return (
     <div className="min-h-screen bg-[#0B0F1A] text-slate-200 flex flex-col">
-      <header className="h-16 border-b border-white/10 flex items-center justify-between px-6 bg-[#0B0F1A]/80 backdrop-blur-md">
-        <div className="flex items-center gap-3"><Shield className="text-blue-600"/><h1 className="font-bold uppercase">MusiCyber SOC AI</h1></div>
-        <div className="flex items-center gap-4">
-          <SettingsIcon className="cursor-pointer text-blue-400" onClick="{()"> setShowSettings(true)} />
-          <LogOut className="cursor-pointer text-red-400" onClick="{()"> signOut(auth)} />
+      <header className="h-16 border-b border-white/10 flex items-center justify-between px-6">
+        <h1 className="font-bold">MUSICIBER SOC AI</h1>
+        <div className="flex gap-4">
+          <SettingsIcon onClick={() => setShowSettings(true)} className="cursor-pointer" />
+          <LogOut onClick={() => signOut(auth)} className="cursor-pointer" />
         </div>
       </header>
 
       <main className="flex-1 grid grid-cols-12 gap-4 p-4 overflow-hidden">
-        <section className="col-span-3 border border-white/10 bg-[#131B2D] rounded-lg p-4 flex flex-col overflow-hidden">
-          <h3 className="text-[10px] font-bold text-slate-500 uppercase mb-4">Live Alert Feed</h3>
-          <div className="flex-1 overflow-y-auto space-y-2">
-            {alerts.map(a => (
-              <div key={a.id} onClick={() => setSelectedAlert(a)} className={cn("p-3 rounded border-l-2 cursor-pointer bg-slate-900/30 border-slate-700", selectedAlert?.id === a.id && "border-blue-500 bg-blue-600/10")}>
-                <p className="text-[10px] font-mono text-slate-400">{a.id}</p>
-                <p className="text-[11px] font-bold line-clamp-1">{a.rule.description}</p>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="col-span-6 border border-white/10 bg-[#131B2D] rounded-lg p-6 overflow-hidden flex flex-col">
+        <div className="col-span-3 border border-white/10 bg-[#131B2D] p-4 rounded-lg overflow-y-auto">
+          <h3 className="text-xs font-bold mb-4">Live Alerts</h3>
+          {alerts.map(a => (
+            <div key={a.id} onClick={() => setSelectedAlert(a)} className="p-2 mb-2 bg-slate-900 rounded cursor-pointer border-l-2 border-slate-700 hover:border-blue-500">
+              <p className="text-[10px] opacity-50">{a.id}</p>
+              <p className="text-xs font-bold truncate">{a.rule.description}</p>
+            </div>
+          ))}
+        </div>
+        
+        <div className="col-span-9 border border-white/10 bg-[#131B2D] p-6 rounded-lg">
           {selectedAlert ? (
-            <div className="flex-1 flex flex-col overflow-hidden">
+            <div>
               <h2 className="text-xl font-bold mb-4">{selectedAlert.id}</h2>
-              <div className="flex-1 bg-black/40 rounded p-4 font-mono text-[11px] overflow-y-auto">
-                {selectedAlert.analysis ? (
-                  <div className="space-y-4">
-                    <p className="text-blue-400">[ANALYSIS]: {selectedAlert.analysis.summary}</p>
-                    <div className="p-3 bg-red-600/10 border border-red-600/20 text-red-200 italic">{selectedAlert.analysis.recommended_action}</div>
-                  </div>
-                ) : <p className="opacity-30">Awaiting AI Analysis...</p>}
-              </div>
-              <button disabled={isAnalyzing || selectedAlert.analysis} onClick={() => runAnalysis(selectedAlert)} className="mt-4 py-3 bg-blue-600 rounded-xl font-bold uppercase text-xs">
-                {isAnalyzing ? "Analyzing..." : selectedAlert.analysis ? "Analysis Ready" : "Run AI Analysis"}
-              </button>
+              <pre className="bg-black/50 p-4 rounded text-[10px] overflow-auto max-h-96">{JSON.stringify(selectedAlert, null, 2)}</pre>
             </div>
-          ) : <div className="h-full flex items-center justify-center opacity-20"><Search size="{40}"/></div>}
-        </section>
-
-        <section className="col-span-3 flex flex-col gap-4">
-          <div className="flex-1 border border-white/10 bg-[#131B2D] rounded-lg p-4 overflow-hidden flex flex-col">
-            <h3 className="text-[10px] font-bold text-slate-500 uppercase mb-2">Audit Logs</h3>
-            <div className="flex-1 overflow-y-auto font-mono text-[9px] text-slate-500">
-              {logs.slice().reverse().map((l, i) => <p key={i} className="mb-1">{l}</p>)}
-            </div>
-          </div>
-        </section>
+          ) : <div className="h-full flex items-center justify-center opacity-20"><Search size={40} /></div>}
+        </div>
       </main>
 
       {showSettings && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-6">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-6">
           <div className="bg-[#131B2D] p-8 rounded-2xl w-full max-w-xl border border-white/10">
             <h2 className="text-xl font-bold mb-6">Agent Configuration</h2>
-            <div className="space-y-4">
-              <input className="w-full bg-slate-900 border border-white/10 p-3 rounded text-sm" placeholder="Manager API (55000)" value={settings.wazuhUrl} onChange={e => setSettings({...settings, wazuhUrl: e.target.value})} />
-              <div className="grid grid-cols-2 gap-4">
-                <input className="bg-slate-900 border border-white/10 p-3 rounded text-sm" placeholder="API User" value={settings.wazuhUser} onChange={e => setSettings({...settings, wazuhUser: e.target.value})} />
-                <input type="password" className="bg-slate-900 border border-white/10 p-3 rounded text-sm" placeholder="API Password" value={settings.wazuhPass} onChange={e => setSettings({...settings, wazuhPass: e.target.value})} />
+            <div className="grid gap-4">
+              <input className="w-full bg-slate-900 p-3 rounded" placeholder="Manager URL" value={settings.wazuhUrl} onChange={e => setSettings({...settings, wazuhUrl: e.target.value})} />
+              <input className="w-full bg-slate-900 p-3 rounded" placeholder="Indexer URL" value={settings.wazuhIndexerUrl} onChange={e => setSettings({...settings, wazuhIndexerUrl: e.target.value})} />
+              <div className="flex gap-4">
+                <button onClick={async () => {
+                  await setDoc(doc(db, "users", user.uid, "settings", "main"), settings);
+                  setShowSettings(false);
+                }} className="flex-1 py-3 bg-blue-600 rounded-xl font-bold">Save Settings</button>
+                <button onClick={() => setShowSettings(false)} className="px-6 py-3 bg-slate-700 rounded-xl">Cancel</button>
               </div>
-              <input className="w-full bg-slate-900 border border-white/10 p-3 rounded text-sm" placeholder="Indexer URL (9200)" value={settings.wazuhIndexerUrl} onChange={e => setSettings({...settings, wazuhIndexerUrl: e.target.value})} />
-              <div className="grid grid-cols-2 gap-4">
-                <input className="bg-slate-900 border border-white/10 p-3 rounded text-sm" placeholder="Indexer User" value={settings.wazuhIndexerUser} onChange={e => setSettings({...settings, wazuhIndexerUser: e.target.value})} />
-                <input type="password" className="bg-slate-900 border border-white/10 p-3 rounded text-sm" placeholder="Indexer Pass" value={settings.wazuhIndexerPass} onChange={e => setSettings({...settings, wazuhIndexerPass: e.target.value})} />
-              </div>
-            </div>
-            <div className="mt-8 flex gap-4">
-              <button onClick={saveSettings} className="flex-1 py-3 bg-blue-600 rounded-xl font-bold uppercase text-xs">Confirm & Sync</button>
-              <button onClick={() => setShowSettings(false)} className="px-6 py-3 bg-slate-700 rounded-xl font-bold uppercase text-xs">Cancel</button>
             </div>
           </div>
         </div>
