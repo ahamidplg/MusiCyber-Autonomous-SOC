@@ -1,0 +1,47 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "ui-monospace", "SFMono-Regular", Menlo, monospace;
+}
+
+@layer base {
+  body {
+    background-color: #0B0F1A;
+    @apply text-slate-200 antialiased;
+  }
+}
+
+@layer utilities {
+  .grid-bg {
+    background-image: radial-gradient(circle at 1px 1px, #1E293B 1px, transparent 0);
+    background-size: 24px 24px;
+  }
+
+  .border-panel {
+    border: 1px solid rgba(255, 255, 255, 0.1);
+  }
+
+  .status-pulse {
+    position: relative;
+  }
+
+  .status-pulse::after {
+    content: '';
+    position: absolute;
+    width: 8px;
+    height: 8px;
+    background: #22C55E;
+    border-radius: 50%;
+    left: -14px;
+    top: 6px;
+    box-shadow: 0 0 8px #22C55E;
+    animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .5; }
+}

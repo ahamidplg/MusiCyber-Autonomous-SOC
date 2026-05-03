@@ -1,0 +1,6 @@
+{
+  "name": "MusiCyber Autonomous Blue Team AI Agent",
+  "description": "An autonomous security orchestration engine that integrates Wazuh, Gemini AI, and Telegram for real-time incident response.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["AI reasoning", "Threat analysis", "Security automation"]
+}

@@ -1,0 +1,50 @@
+{
+  "entities": {
+    "Settings": {
+      "title": "System Settings",
+      "description": "Configuration for Wazuh Manager, Indexer, Telegram, and Gemini.",
+      "type": "object",
+      "properties": {
+        "wazuhUrl": { "type": "string" },
+        "wazuhUser": { "type": "string" },
+        "wazuhPass": { "type": "string" },
+        "wazuhIndexerUrl": { "type": "string" },
+        "wazuhIndexerUser": { "type": "string" },
+        "wazuhIndexerPass": { "type": "string" },
+        "telegramToken": { "type": "string" },
+        "telegramAdminId": { "type": "string" },
+        "geminiModel": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "updatedBy": { "type": "string" }
+      },
+      "required": ["updatedAt", "updatedBy"]
+    },
+    "AuditLog": {
+      "title": "Audit Log",
+      "description": "Historical record of agent actions and AI reasoning.",
+      "type": "object",
+      "properties": {
+        "alertId": { "type": "string" },
+        "action": { "type": "string" },
+        "reasoning": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "actor": { "type": "string" }
+      },
+      "required": ["alertId", "action", "timestamp", "actor"]
+    }
+  },
+  "firestore": {
+    "configs/global": {
+      "schema": "Settings",
+      "description": "Global system configuration."
+    },
+    "users/{userId}/settings": {
+      "schema": "Settings",
+      "description": "User-specific configuration overrides."
+    },
+    "audit_logs/{logId}": {
+      "schema": "AuditLog",
+      "description": "Collection of system audit logs."
+    }
+  }
+}
