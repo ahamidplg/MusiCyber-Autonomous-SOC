@@ -9,9 +9,11 @@ import path from "path";
 import { initializeApp } from "firebase/app";
 import { getFirestore, collection, doc, setDoc, getDocs, getDoc, query, orderBy, limit } from "firebase/firestore";
 
+// Baca file config secara aman di Vercel Serverless
 const configPath = path.join(process.cwd(), "firebase-applet-config.json");
 const firebaseConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
 
+// Inisialisasi Firebase App murni untuk database (bisa jalan di Serverless Node.js)
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
 
@@ -32,8 +34,7 @@ interface AppConfig {
 
 const ALERTS_COLLECTION = "wazuh_alerts";
 
-// --- MIDDLEWARE STATLESS: Ambil Config User dari Firestore ---
-// Setiap request wajib bawa header x-user-id
+// --- MIDDLEWARE STATELESS: Ambil Config User dari Firestore ---
 async function getUserConfig(uid: string): Promise<AppConfig | null> {
   if (!uid) return null;
   try {
@@ -52,7 +53,7 @@ async function getUserConfig(uid: string): Promise<AppConfig | null> {
 // --- FIREBASE HELPER FUNCTIONS ---
 async function saveAlertToFirestore(alertData: any, uid: string) {
   try {
-    // Kita tambahin uid biar alert-nya terisolasi per user
+    // Tambahin userId biar alert-nya terisolasi per user
     const alertRef = doc(db, ALERTS_COLLECTION, alertData.id);
     await setDoc(alertRef, { ...alertData, userId: uid }, { merge: true });
   } catch (error) {
@@ -60,15 +61,14 @@ async function saveAlertToFirestore(alertData: any, uid: string) {
   }
 }
 
-// Fitur multi-tenant: Tarik alert khusus punya user yang lagi request
 async function getAlertsFromFirestore(uid: string) {
   try {
-    // Note: Pastikan di Firestore Rules / Index udah support query ini
     const q = query(collection(db, ALERTS_COLLECTION), orderBy("timestamp", "desc"), limit(50));
     const querySnapshot = await getDocs(q);
     const fetchedAlerts: any[] = [];
     querySnapshot.forEach((docSnap) => {
       const data = docSnap.data();
+      // Filter hanya alert milik user yang bersangkutan
       if (data.userId === uid) {
         fetchedAlerts.push(data);
       }
@@ -92,7 +92,6 @@ class WazuhConnector {
   private indexerPass: string;
   private httpsAgent: https.Agent;
 
-  // Constructor sekarang butuh config, tidak ada variabel global lagi
   constructor(cfg: AppConfig) {
     this.baseUrl = (cfg.wazuhUrl || "").replace(/\/$/, "");
     this.user = cfg.wazuhUser || "";
@@ -113,7 +112,7 @@ class WazuhConnector {
         timeout: 5000,
         httpsAgent: this.httpsAgent
       });
-      return response.data; // token
+      return response.data; 
     } catch (err: any) {
       console.error(`[WAZUH] Auth Error: ${err.message}`);
       return null;
@@ -177,17 +176,19 @@ class WazuhConnector {
 
 // Middleware untuk mengecek Header UID dari Frontend
 app.use("/api", (req, res, next) => {
-  // Pengecualian untuk webhook karena asalnya dari Telegram, bukan frontend kita
-  if (req.path.startsWith("/telegram-webhook")) return next();
+  // Pengecualian untuk webhook (dari Telegram) & test telegram (karena uid dikirim dari app)
+  if (req.path.startsWith("/telegram-webhook") || req.path === "/config/test/telegram") {
+    return next();
+  }
   
   const uid = req.headers['x-user-id'] as string;
-  if (!uid && req.path !== "/config/test/telegram") {
+  if (!uid) {
     return res.status(401).json({ error: "Unauthorized: Missing x-user-id header" });
   }
   next();
 });
 
-// Endpoint webhook dinamis per user. Telegram bakal nembak ke URL ini bawa UID.
+// Endpoint webhook dinamis per user
 app.post("/api/telegram-webhook/:uid", async (req, res) => {
   const { uid } = req.params;
   const config = await getUserConfig(uid);
@@ -224,6 +225,25 @@ app.post("/api/config/test", async (req, res) => {
     res.json({ status: "success", manager: config.wazuhUrl });
   } else {
     res.json({ status: "error", message: "Failed to authenticate with Wazuh API." });
+  }
+});
+
+// Endpoint test telegram yang sempat hilang sudah kembali
+app.post("/api/config/test/telegram", async (req, res) => {
+  const { token, chatId } = req.body;
+  if (!token || !chatId) {
+    return res.status(400).json({ status: "error", message: "Token and Chat ID are required." });
+  }
+
+  const testBot = new TelegramBot(token);
+  try {
+    await testBot.sendMessage(chatId.trim(), "🔔 MusiCyber SOC Connectivity Test:\n\nIf you see this message, your Telegram configuration is valid and active.");
+    res.json({ status: "success", message: "Test message sent successfully!" });
+  } catch (err: any) {
+    let msg = err.message;
+    if (msg.includes("chat not found")) msg = "Chat not found. Did you send /start to the bot first?";
+    else if (msg.includes("401")) msg = "Unauthorized. Is your bot token correct?";
+    res.status(500).json({ status: "error", message: msg });
   }
 });
 
