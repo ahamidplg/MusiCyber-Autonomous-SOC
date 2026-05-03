@@ -35,7 +35,6 @@ export default function App() {
   });
   const [agents, setAgents] = useState<any[]>([]);
 
-  // Monitor Status Login
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (u) => {
       setUser(u);
@@ -45,7 +44,6 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Loop Pengambilan Data (Polling setiap 15 detik)
   useEffect(() => {
     if (user && settings.wazuhUrl && settings.wazuhIndexerUrl) {
       const poll = async () => {
@@ -88,25 +86,19 @@ export default function App() {
   const fetchAlerts = async () => {
     if (!user) return;
     try {
-      // Tarik data live dari Wazuh lewat Backend Proxy
       const res = await axios.post("/api/alerts", settings);
       const liveAlerts = Array.isArray(res.data) ? res.data : [];
-      
-      // Simpan ke Firestore dari Frontend (Bypass permission error)
       if (liveAlerts.length > 0) {
         for (const alert of liveAlerts) {
           const alertRef = doc(db, "wazuh_alerts", alert.id);
           await setDoc(alertRef, { ...alert, userId: user.uid }, { merge: true });
         }
       }
-
-      // Load data historis milik user
       const q = query(collection(db, "wazuh_alerts"), where("userId", "==", user.uid));
       const snap = await getDocs(q);
       const dbAlerts = snap.docs.map(d => d.data())
         .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
         .slice(0, 50);
-      
       setAlerts(dbAlerts);
     } catch (err: any) {
       addLog(`[ERROR] Sync Gagal: ${err.response?.status || "Network Error"}`);
@@ -142,7 +134,7 @@ export default function App() {
     <div className="min-h-screen bg-[#0B0F1A] flex items-center justify-center p-6 grid-bg">
       <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} className="max-w-md w-full bg-[#131B2D] border border-white/10 rounded-2xl p-8 text-center shadow-2xl">
         <Shield className="w-16 h-16 text-blue-600 mx-auto mb-6" />
-        <h1 className="text-2xl font-bold text-white mb-2 uppercase tracking-tighter italic font-serif">MusiCyber SOC AI</h1>
+        <h1 className="text-2xl font-bold text-white mb-2 uppercase tracking-tighter font-serif">MusiCyber SOC AI</h1>
         <p className="text-slate-400 text-sm mb-8">Independent Security Intelligence Platform</p>
         <button onClick={loginWithGoogle} className="w-full py-4 bg-white text-black font-bold rounded-xl hover:bg-slate-100 transition-all">Sign in with Google</button>
       </motion.div>
@@ -151,25 +143,25 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#0B0F1A] text-slate-200 flex flex-col font-sans selection:bg-blue-600/30">
-      {/* Header Branding */}
       <header className="h-16 border-b border-white/10 flex items-center justify-between px-6 bg-[#0B0F1A]/80 backdrop-blur-md z-10">
         <div className="flex items-center gap-3">
           <Shield className="text-blue-600" size={24}/>
-          <h1 className="font-bold tracking-widest uppercase italic">MusiCyber <span className="text-blue-500">SOC AI</span></h1>
+          <h1 className="font-bold tracking-widest uppercase">MusiCyber <span className="text-blue-500">SOC AI</span></h1>
         </div>
         <div className="flex items-center gap-6">
-          <div className="hidden md:flex gap-4 text-[10px] font-mono text-slate-500 uppercase tracking-widest">
+          <div className="hidden md:flex gap-4 text-[10px] font-mono text-slate-500 uppercase tracking-widest items-center">
             <span>SIEM: <span className={settings.wazuhUrl ? "text-green-500" : "text-red-500"}>{settings.wazuhUrl ? "READY" : "WAIT"}</span></span>
+            <div className="w-[1px] h-3 bg-white/10"></div>
+            <span>BOT: <span className={settings.telegramToken ? "text-green-500" : "text-red-500"}>{settings.telegramToken ? "ONLINE" : "OFFLINE"}</span></span>
             <div className="w-[1px] h-3 bg-white/10"></div>
             <span>USER: <span className="text-blue-400">{user.email?.split("@")[0]}</span></span>
           </div>
-          <SettingsIcon className="cursor-pointer hover:text-blue-400 transition-colors" onClick={() => setShowSettings(true)} />
-          <LogOut className="cursor-pointer hover:text-red-400 transition-colors" onClick={() => signOut(auth)} />
+          <SettingsIcon className="cursor-pointer hover:text-blue-400 transition-colors" size={20} onClick={() => setShowSettings(true)} />
+          <LogOut className="cursor-pointer hover:text-red-400 transition-colors" size={20} onClick={() => signOut(auth)} />
         </div>
       </header>
 
       <main className="flex-1 grid grid-cols-12 gap-4 p-4 overflow-hidden">
-        {/* Alerts Sidebar */}
         <section className="col-span-3 border border-white/10 bg-[#131B2D] rounded-lg flex flex-col overflow-hidden shadow-xl">
           <div className="p-4 border-b border-white/5 bg-slate-900/50 flex justify-between items-center font-bold">
             <h3 className="text-[10px] text-slate-500 uppercase tracking-widest">Live Alert Feed</h3>
@@ -185,13 +177,12 @@ export default function App() {
           </div>
         </section>
 
-        {/* Center Analysis Panel */}
         <section className="col-span-6 border border-white/10 bg-[#131B2D] rounded-lg overflow-hidden flex flex-col relative shadow-2xl">
           {selectedAlert ? (
             <div className="flex-1 flex flex-col p-6 overflow-hidden">
               <div className="mb-6 flex justify-between items-start">
                 <div>
-                  <h2 className="text-2xl font-bold text-white mb-1 tracking-tighter uppercase italic">{selectedAlert.id}</h2>
+                  <h2 className="text-2xl font-bold text-white mb-1 tracking-tighter uppercase">{selectedAlert.id}</h2>
                   <p className="text-xs text-blue-400 font-mono uppercase tracking-widest">{selectedAlert.rule.description}</p>
                 </div>
                 {selectedAlert.analysis && (
@@ -232,7 +223,6 @@ export default function App() {
           )}
         </section>
 
-        {/* Right Assets & Logs Panel */}
         <section className="col-span-3 flex flex-col gap-4 overflow-hidden">
           <div className="bg-[#131B2D] border border-white/10 rounded-lg p-4 shadow-xl">
             <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4">Network Assets ({agents.length})</h3>
@@ -254,7 +244,6 @@ export default function App() {
         </section>
       </main>
 
-      {/* Settings Modal (Kredensial Lengkap) */}
       <AnimatePresence>
         {showSettings && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-6">
