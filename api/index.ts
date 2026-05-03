@@ -3,9 +3,14 @@ import TelegramBot from "node-telegram-bot-api";
 import axios from "axios";
 import https from "https";
 
-// Import Firebase (Pastikan path '../src/firebase' ini benar sesuai struktur folder lo)
-import { collection, doc, setDoc, getDocs, getDoc, query, orderBy, limit } from "firebase/firestore";
-import { db } from "../src/firebase"; 
+// --- FIREBASE KHUSUS BACKEND (TANPA AUTH) ---
+import { initializeApp } from "firebase/app";
+import { getFirestore, collection, doc, setDoc, getDocs, getDoc, query, orderBy, limit } from "firebase/firestore";
+import firebaseConfig from "../firebase-applet-config.json";
+
+// Inisialisasi Firebase App murni untuk database (bisa jalan di Serverless Node.js)
+const firebaseApp = initializeApp(firebaseConfig);
+const db = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
 
 const app = express();
 app.use(express.json());
@@ -39,8 +44,8 @@ async function getAlertsFromFirestore() {
     const q = query(collection(db, ALERTS_COLLECTION), orderBy("timestamp", "desc"), limit(50));
     const querySnapshot = await getDocs(q);
     const fetchedAlerts: any[] = [];
-    querySnapshot.forEach((doc) => {
-      fetchedAlerts.push(doc.data());
+    querySnapshot.forEach((docSnap) => {
+      fetchedAlerts.push(docSnap.data());
     });
     return fetchedAlerts;
   } catch (error) {
@@ -183,12 +188,13 @@ const updateTelegramBot = async (token: string, chatId: string) => {
   }
 
   try {
-    // Mode Webhook (tanpa polling)
+    // Mode Webhook (tanpa polling) untuk Vercel Serverless
     bot = new TelegramBot(token);
     currentTelegramToken = token;
     currentAdminChatId = trimmedChatId;
 
-    const appUrl = process.env.APP_URL; 
+    // Pastikan APP_URL lo udah terisi di Environment Variables Vercel
+    const appUrl = process.env.APP_URL || ""; 
     if (appUrl) {
       const webhookUrl = `${appUrl.replace(/\/$/, "")}/api/telegram-webhook`;
       await bot.setWebHook(webhookUrl);
@@ -213,7 +219,7 @@ const updateTelegramBot = async (token: string, chatId: string) => {
 
 // --- ROUTES ---
 
-// Endpoint khusus untuk menerima ping dari Telegram
+// Endpoint khusus untuk menerima update dari Telegram
 app.post("/api/telegram-webhook", (req, res) => {
   if (bot) {
     bot.processUpdate(req.body);
@@ -273,7 +279,7 @@ app.get("/api/alerts", async (req, res) => {
     }));
   }
 
-  // Selalu kirim balik data terbaru dari Firestore
+  // Tarik dan kirim data dari Firestore
   const firestoreAlerts = await getAlertsFromFirestore();
   res.json(firestoreAlerts);
 });
