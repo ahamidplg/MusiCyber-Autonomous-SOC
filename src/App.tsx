@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from "react";
-import { 
-  Shield, 
-  AlertTriangle, 
-  Terminal, 
-  Activity, 
-  CheckCircle, 
+import {
+  Shield,
+  AlertTriangle,
+  Terminal,
+  Activity,
+  CheckCircle,
   Search,
   Zap,
   Bot,
@@ -27,7 +27,8 @@ import { auth, loginWithGoogle, db } from "./firebase";
 import { onAuthStateChanged, User as FirebaseUser, signOut } from "firebase/auth";
 import { doc, getDoc, setDoc, collection, addDoc, serverTimestamp } from "firebase/firestore";
 
-// Tambahkan blok ini di bawah area import
+// --- GLOBAL AXIOS INTERCEPTOR ---
+// Memastikan setiap request API otomatis mengirimkan UID user ke backend Vercel (Stateless Architecture)
 axios.interceptors.request.use((config) => {
   const currentUser = auth.currentUser;
   if (currentUser) {
@@ -37,6 +38,7 @@ axios.interceptors.request.use((config) => {
 }, (error) => {
   return Promise.reject(error);
 });
+// --------------------------------
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -77,7 +79,7 @@ interface FirestoreErrorInfo {
       providerId?: string | null;
       email?: string | null;
     }[];
-  }
+  };
 }
 
 function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
@@ -96,7 +98,7 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
     },
     operationType,
     path
-  }
+  };
   console.error('Firestore Error: ', JSON.stringify(errInfo));
   throw new Error(JSON.stringify(errInfo));
 }
@@ -120,7 +122,6 @@ export default function App() {
     telegramChatId: "",
     geminiModel: "gemini-3-flash-preview"
   });
-
   const [isCheckingConnection, setIsCheckingConnection] = useState(false);
   const [showDeploymentGuide, setShowDeploymentGuide] = useState(false);
   const [agents, setAgents] = useState<any[]>([]);
@@ -269,6 +270,9 @@ export default function App() {
       addLog(`[AGENT] Analysis complete for ${alert.id}. Severity: ${result.severity}`);
       await logToFirestore(alert.id, "AI_ANALYSIS", result.summary);
       fetchAlerts();
+      
+      // Update selected alert dynamically
+      setSelectedAlert((prev: any) => prev?.id === alert.id ? { ...prev, status: "Analyzed", analysis: result } : prev);
     } catch (err) {
       addLog(`[ERROR] AI Reasoning failed for ${alert.id}`);
     } finally {
@@ -329,7 +333,6 @@ export default function App() {
             <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/nps/google.svg" className="w-5 h-5" alt="Google" />
             Sign in with Google
           </button>
-
           <p className="mt-8 text-[10px] uppercase tracking-widest text-slate-500 font-mono">
             SECURE ACCESS ONLY_
           </p>
@@ -408,8 +411,8 @@ export default function App() {
                 agents.map(agent => (
                   <div key={agent.id} className="flex items-center justify-between p-2 bg-white/5 rounded text-[10px]">
                     <div className="flex items-center gap-2">
-                       <div className={cn("w-1.5 h-1.5 rounded-full", agent.status === "active" ? "bg-green-500" : "bg-red-500")} />
-                       <span className="text-slate-300 font-mono">{agent.name}</span>
+                      <div className={cn("w-1.5 h-1.5 rounded-full", agent.status === "active" ? "bg-green-500" : "bg-red-500")} />
+                      <span className="text-slate-300 font-mono">{agent.name}</span>
                     </div>
                     <span className="text-slate-500">{agent.ip}</span>
                   </div>
@@ -421,7 +424,7 @@ export default function App() {
           <div className="border-panel bg-[#131B2D] flex-1 rounded-lg p-4 flex flex-col overflow-hidden">
             <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4">Live Alert Feed</h3>
             <div className="space-y-2 overflow-y-auto flex-1 pr-1 custom-scrollbar">
-              {safeAlerts.slice().reverse().map((alert) => (
+              {safeAlerts.slice().map((alert) => (
                 <div 
                   key={alert.id}
                   onClick={() => setSelectedAlert(alert)}
@@ -503,7 +506,7 @@ export default function App() {
 
                           <p className="text-red-400 mb-2 uppercase font-bold tracking-widest">[RESPONSE_DIRECTIVE]</p>
                           <div className="bg-red-500/10 p-4 border border-red-500/30 rounded text-red-200 font-bold italic shadow-lg shadow-red-500/5">
-                             “{selectedAlert.analysis.recommended_action}”
+                              {selectedAlert.analysis.recommended_action}
                           </div>
                         </>
                       ) : (
@@ -665,7 +668,7 @@ export default function App() {
                         <input 
                           type="password"
                           className="w-full bg-slate-900/80 border border-white/10 rounded-lg p-3 text-sm focus:outline-none focus:border-blue-500 transition-all font-mono"
-                          placeholder="••••••••"
+                          placeholder="••••••••••••"
                           value={settings.wazuhIndexerPass}
                           onChange={(e) => setSettings({...settings, wazuhIndexerPass: e.target.value})}
                         />
@@ -780,6 +783,7 @@ export default function App() {
                   <LogOut size={20} className="rotate-180" />
                 </button>
               </div>
+
               <div className="p-8 space-y-6">
                 <p className="text-slate-400 text-sm">Deploying a Wazuh agent allows this AI orchestration engine to monitor your infrastructure in real-time.</p>
                 
@@ -801,6 +805,7 @@ export default function App() {
                   </div>
                 </div>
               </div>
+
               <div className="p-6 border-t border-white/10 flex bg-slate-900/50">
                 <button 
                   onClick={() => setShowDeploymentGuide(false)}
