@@ -5,15 +5,13 @@ import https from "https";
 import fs from "fs";
 import path from "path";
 
-// --- FIREBASE KHUSUS BACKEND (TANPA IMPORT DARI SRC) ---
+// --- FIREBASE KHUSUS BACKEND (TANPA AUTH) ---
 import { initializeApp } from "firebase/app";
 import { getFirestore, collection, doc, setDoc, getDocs, getDoc, query, orderBy, limit } from "firebase/firestore";
 
-// Baca file config secara aman di Vercel Serverless
 const configPath = path.join(process.cwd(), "firebase-applet-config.json");
 const firebaseConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
 
-// Inisialisasi Firebase App murni untuk database (bisa jalan di Serverless Node.js)
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
 
@@ -34,23 +32,46 @@ interface AppConfig {
 
 const ALERTS_COLLECTION = "wazuh_alerts";
 
-// --- FIREBASE HELPER FUNCTIONS ---
-async function saveAlertToFirestore(alertData: any) {
+// --- MIDDLEWARE STATLESS: Ambil Config User dari Firestore ---
+// Setiap request wajib bawa header x-user-id
+async function getUserConfig(uid: string): Promise<AppConfig | null> {
+  if (!uid) return null;
   try {
+    const docRef = doc(db, "users", uid, "settings", "main");
+    const snap = await getDoc(docRef);
+    if (snap.exists()) {
+      return snap.data() as AppConfig;
+    }
+    return null;
+  } catch (error) {
+    console.error(`[FIRESTORE] Gagal narik config untuk UID ${uid}:`, error);
+    return null;
+  }
+}
+
+// --- FIREBASE HELPER FUNCTIONS ---
+async function saveAlertToFirestore(alertData: any, uid: string) {
+  try {
+    // Kita tambahin uid biar alert-nya terisolasi per user
     const alertRef = doc(db, ALERTS_COLLECTION, alertData.id);
-    await setDoc(alertRef, alertData, { merge: true });
+    await setDoc(alertRef, { ...alertData, userId: uid }, { merge: true });
   } catch (error) {
     console.error("[FIRESTORE] Gagal simpan alert:", error);
   }
 }
 
-async function getAlertsFromFirestore() {
+// Fitur multi-tenant: Tarik alert khusus punya user yang lagi request
+async function getAlertsFromFirestore(uid: string) {
   try {
+    // Note: Pastikan di Firestore Rules / Index udah support query ini
     const q = query(collection(db, ALERTS_COLLECTION), orderBy("timestamp", "desc"), limit(50));
     const querySnapshot = await getDocs(q);
     const fetchedAlerts: any[] = [];
     querySnapshot.forEach((docSnap) => {
-      fetchedAlerts.push(docSnap.data());
+      const data = docSnap.data();
+      if (data.userId === uid) {
+        fetchedAlerts.push(data);
+      }
     });
     return fetchedAlerts;
   } catch (error) {
@@ -60,33 +81,26 @@ async function getAlertsFromFirestore() {
 }
 
 /**
- * OPENCLAW WAZUH ADAPTER
+ * OPENCLAW WAZUH ADAPTER (Stateless Version)
  */
 class WazuhConnector {
-  private baseUrl: string = "";
-  private user: string = "";
-  private pass: string = "";
-  private indexerUrl: string = "";
-  private indexerUser: string = "";
-  private indexerPass: string = "";
-  private token: string | null = null;
+  private baseUrl: string;
+  private user: string;
+  private pass: string;
+  private indexerUrl: string;
+  private indexerUser: string;
+  private indexerPass: string;
   private httpsAgent: https.Agent;
 
-  constructor() {
-    this.httpsAgent = new https.Agent({ rejectUnauthorized: false });
-  }
-
-  updateConfig(cfg: AppConfig) {
+  // Constructor sekarang butuh config, tidak ada variabel global lagi
+  constructor(cfg: AppConfig) {
     this.baseUrl = (cfg.wazuhUrl || "").replace(/\/$/, "");
     this.user = cfg.wazuhUser || "";
     this.pass = cfg.wazuhPass || "";
-    
     this.indexerUrl = (cfg.wazuhIndexerUrl || "").replace(/\/$/, "");
     this.indexerUser = cfg.wazuhIndexerUser || "admin";
     this.indexerPass = cfg.wazuhIndexerPass || "";
-    
-    this.token = null; 
-    console.log(`[OPENCLAW] SIEM Config Updated. API: ${this.baseUrl} | Indexer: ${this.indexerUrl}`);
+    this.httpsAgent = new https.Agent({ rejectUnauthorized: false });
   }
 
   async authenticate() {
@@ -99,36 +113,21 @@ class WazuhConnector {
         timeout: 5000,
         httpsAgent: this.httpsAgent
       });
-      this.token = response.data;
-      console.log(`[WAZUH] Authenticated successfully via ${authUrl}`);
-      
-      const info = await axios.get(`${this.baseUrl}/manager/info`, {
-        headers: { Authorization: `Bearer ${this.token}` },
-        httpsAgent: this.httpsAgent
-      });
-      console.log(`[WAZUH] Connected to Wazuh Manager: ${info.data.data.name} v${info.data.data.version}`);
-      
-      return this.token;
+      return response.data; // token
     } catch (err: any) {
-      console.error(`[WAZUH] Auth/Info Error: ${err.message} URL: ${authUrl}`);
+      console.error(`[WAZUH] Auth Error: ${err.message}`);
       return null;
     }
   }
 
   async getAlerts() {
-    if (!this.indexerUrl || !this.indexerPass) {
-      console.log("[WAZUH] Indexer not configured. Skipping fetch.");
-      return null;
-    }
-
+    if (!this.indexerUrl || !this.indexerPass) return null;
     const searchUrl = `${this.indexerUrl}/wazuh-alerts*/_search`;
     try {
       const response = await axios.post(searchUrl, {
         sort: [{ "timestamp": { "order": "desc" } }],
         size: 15,
-        query: {
-          range: { "rule.level": { "gte": 5 } } // Level 5 and up
-        }
+        query: { range: { "rule.level": { "gte": 5 } } }
       }, {
         auth: { username: this.indexerUser, password: this.indexerPass },
         headers: { 'Content-Type': 'application/json' },
@@ -136,8 +135,6 @@ class WazuhConnector {
         timeout: 20000
       });
 
-      console.log(`[WAZUH] Indexer query successful: ${response.data.hits?.total?.value || 0} hits found.`);
-      
       const hits = response.data.hits?.hits || [];
       return hits.map((hit: any) => {
         const source = hit._source;
@@ -153,22 +150,18 @@ class WazuhConnector {
         };
       });
     } catch (err: any) {
-      if (err.code === 'ECONNABORTED') {
-        console.error(`[WAZUH] Indexer Timeout (20s): Is the indexer reachable at ${searchUrl}?`);
-      } else {
-        console.error(`[WAZUH] Indexer Fetch Error: ${err.message}`);
-      }
+      console.error(`[WAZUH] Indexer Fetch Error: ${err.message}`);
       return null;
     }
   }
 
   async getAgents() {
     if (!this.baseUrl) return null;
-    if (!this.token) await this.authenticate();
-    if (!this.token) return null;
+    const token = await this.authenticate();
+    if (!token) return null;
     try {
       const response = await axios.get(`${this.baseUrl}/agents`, {
-        headers: { Authorization: `Bearer ${this.token}` },
+        headers: { Authorization: `Bearer ${token}` },
         httpsAgent: this.httpsAgent,
         timeout: 5000
       });
@@ -180,155 +173,123 @@ class WazuhConnector {
   }
 }
 
-const wazuh = new WazuhConnector();
-let bot: TelegramBot | null = null;
-let currentTelegramToken = "";
-let currentAdminChatId = "";
-
-const updateTelegramBot = async (token: string, chatId: string) => {
-  const trimmedChatId = chatId ? chatId.trim() : "";
-  if (!token || token === currentTelegramToken) {
-    currentAdminChatId = trimmedChatId;
-    return;
-  }
-
-  try {
-    // Mode Webhook (tanpa polling) untuk Vercel Serverless
-    bot = new TelegramBot(token);
-    currentTelegramToken = token;
-    currentAdminChatId = trimmedChatId;
-
-    // Pastikan APP_URL lo udah terisi di Environment Variables Vercel
-    const appUrl = process.env.APP_URL || ""; 
-    if (appUrl) {
-      const webhookUrl = `${appUrl.replace(/\/$/, "")}/api/telegram-webhook`;
-      await bot.setWebHook(webhookUrl);
-      console.log(`[TELEGRAM] Webhook set to ${webhookUrl}. Admin ID: ${trimmedChatId || "NOT SET"}`);
-    } else {
-      console.warn("[TELEGRAM] Warning: APP_URL environment variable is missing. Webhook not set.");
-    }
-
-    bot.onText(/\/start/, (msg) => {
-      const chatId = msg.chat.id;
-      bot?.sendMessage(chatId, `🚀 MusiCyber SOC Bot Activated!\n\nYour Admin Chat ID is: ${chatId}\n\nCopy this ID into your settings to receive incident reports.`);
-    });
-
-    bot.onText(/\/status/, (msg) => {
-      const chatId = msg.chat.id;
-      bot?.sendMessage(chatId, `🛡️ MusiCyber Security Engine: ACTIVE\nStatus: CALIBRATED\nMonitoring: ${wazuh ? "CONNECTED" : "SIMULATED"}`);
-    });
-  } catch (err) {
-    console.error("Failed to init bot:", (err as Error).message);
-  }
-};
-
 // --- ROUTES ---
 
-// Endpoint khusus untuk menerima update dari Telegram
-app.post("/api/telegram-webhook", (req, res) => {
-  if (bot) {
+// Middleware untuk mengecek Header UID dari Frontend
+app.use("/api", (req, res, next) => {
+  // Pengecualian untuk webhook karena asalnya dari Telegram, bukan frontend kita
+  if (req.path.startsWith("/telegram-webhook")) return next();
+  
+  const uid = req.headers['x-user-id'] as string;
+  if (!uid && req.path !== "/config/test/telegram") {
+    return res.status(401).json({ error: "Unauthorized: Missing x-user-id header" });
+  }
+  next();
+});
+
+// Endpoint webhook dinamis per user. Telegram bakal nembak ke URL ini bawa UID.
+app.post("/api/telegram-webhook/:uid", async (req, res) => {
+  const { uid } = req.params;
+  const config = await getUserConfig(uid);
+  
+  if (config && config.telegramToken) {
+    const bot = new TelegramBot(config.telegramToken);
     bot.processUpdate(req.body);
   }
   res.sendStatus(200);
 });
 
 app.post("/api/config", async (req, res) => {
+  const uid = req.headers['x-user-id'] as string;
   const config = req.body as AppConfig;
-  wazuh.updateConfig(config);
-  await updateTelegramBot(config.telegramToken, config.telegramChatId);
+  
+  // Daftarin Webhook otomatis tiap kali config disave
+  if (config.telegramToken) {
+    const bot = new TelegramBot(config.telegramToken);
+    const appUrl = process.env.APP_URL || "";
+    if (appUrl) {
+      const webhookUrl = `${appUrl.replace(/\/$/, "")}/api/telegram-webhook/${uid}`;
+      await bot.setWebHook(webhookUrl);
+      console.log(`[TELEGRAM] Webhook set to ${webhookUrl} for UID: ${uid}`);
+    }
+  }
   res.json({ status: "success", message: "MusiCyber engine recalibrated" });
 });
 
 app.post("/api/config/test", async (req, res) => {
   const config = req.body as AppConfig;
-  const tester = new WazuhConnector();
-  tester.updateConfig(config);
+  const tester = new WazuhConnector(config);
   const token = await tester.authenticate();
   if (token) {
     res.json({ status: "success", manager: config.wazuhUrl });
   } else {
-    res.json({ status: "error", message: "Failed to authenticate with Wazuh API. Check URL/User/Pass and Port 55000." });
-  }
-});
-
-app.post("/api/config/test/telegram", async (req, res) => {
-  const { token, chatId } = req.body;
-  if (!token || !chatId) {
-    return res.status(400).json({ status: "error", message: "Token and Chat ID are required." });
-  }
-
-  const testBot = new TelegramBot(token);
-  try {
-    await testBot.sendMessage(chatId.trim(), "🔔 MusiCyber SOC Connectivity Test:\n\nIf you see this message, your Telegram configuration is valid and active.");
-    res.json({ status: "success", message: "Test message sent successfully!" });
-  } catch (err: any) {
-    let msg = err.message;
-    if (msg.includes("chat not found")) msg = "Chat not found. Did you send /start to the bot first?";
-    else if (msg.includes("401")) msg = "Unauthorized. Is your bot token correct?";
-    res.status(500).json({ status: "error", message: msg });
+    res.json({ status: "error", message: "Failed to authenticate with Wazuh API." });
   }
 });
 
 app.get("/api/agents", async (req, res) => {
+  const uid = req.headers['x-user-id'] as string;
+  const config = await getUserConfig(uid);
+  
+  if (!config) return res.json([]);
+
+  const wazuh = new WazuhConnector(config);
   const realAgents = await wazuh.getAgents();
   res.json(realAgents || []);
 });
 
 app.get("/api/alerts", async (req, res) => {
-  const realAlerts = await wazuh.getAlerts();
+  const uid = req.headers['x-user-id'] as string;
+  const config = await getUserConfig(uid);
   
-  if (realAlerts && realAlerts.length > 0) {
-    // Simpan semua alert baru ke Firestore secara paralel
-    await Promise.all(realAlerts.map(async (fa: any) => {
-      await saveAlertToFirestore(fa);
-    }));
+  if (config) {
+    const wazuh = new WazuhConnector(config);
+    const realAlerts = await wazuh.getAlerts();
+    
+    if (realAlerts && realAlerts.length > 0) {
+      await Promise.all(realAlerts.map(async (fa: any) => {
+        await saveAlertToFirestore(fa, uid);
+      }));
+    }
   }
 
-  // Tarik dan kirim data dari Firestore
-  const firestoreAlerts = await getAlertsFromFirestore();
+  const firestoreAlerts = await getAlertsFromFirestore(uid);
   res.json(firestoreAlerts);
 });
 
 app.post("/api/alerts/:id/report", async (req, res) => {
   const { id } = req.params;
-  
+  const uid = req.headers['x-user-id'] as string;
+  const config = await getUserConfig(uid);
+
+  if (!config || !config.telegramToken || !config.telegramChatId) {
+    return res.status(400).json({ error: "Telegram bot not configured" });
+  }
+
   try {
     const alertRef = doc(db, ALERTS_COLLECTION, id);
     const alertSnap = await getDoc(alertRef);
 
-    if (!alertSnap.exists()) {
-      return res.status(400).json({ error: "Alert not found in database" });
-    }
+    if (!alertSnap.exists()) return res.status(400).json({ error: "Alert not found" });
 
     const alert = alertSnap.data();
+    if (!alert.analysis) return res.status(400).json({ error: "Analysis not found" });
 
-    if (!alert.analysis) {
-      return res.status(400).json({ error: "Analysis not found" });
-    }
-
-    if (bot && currentAdminChatId) {
-      const report = `📄 OPENCLAW SECURITY INCIDENT REPORT\n\n` +
-                     `Incident ID: ${alert.id}\n` +
-                     `Severity: ${alert.severity}\n` +
-                     `Target Agent: ${alert.agent.name}\n` +
-                     `Source IP: ${alert.source.IP}\n\n` +
-                     `🔍 AI ANALYSIS:\n${alert.analysis.summary.slice(0, 3000)}\n\n` +
-                     `MITRE Technique: ${alert.analysis.mitre_attack}\n\n` +
-                     `🛡️ RECOMMENDED ACTION:\n${alert.analysis.recommended_action.slice(0, 500)}\n\n` +
-                     `#SecurityAlert #SOC`;
-      
-      try {
-        await bot.sendMessage(currentAdminChatId, report);
-        res.json({ status: "sent" });
-      } catch (err: any) {
-        console.error(`[TELEGRAM] Dispatch Failed: ${err.message}`);
-        res.status(500).json({ error: `Telegram dispatch failed: ${err.message}` });
-      }
-    } else {
-      res.status(400).json({ error: "Telegram bot not configured" });
-    }
-  } catch (error) {
-    res.status(500).json({ error: "Internal server error reading from Firestore" });
+    const bot = new TelegramBot(config.telegramToken);
+    const report = `📄 OPENCLAW SECURITY INCIDENT REPORT\n\n` +
+                   `Incident ID: ${alert.id}\n` +
+                   `Severity: ${alert.severity}\n` +
+                   `Target Agent: ${alert.agent.name}\n` +
+                   `Source IP: ${alert.source.IP}\n\n` +
+                   `🔍 AI ANALYSIS:\n${alert.analysis.summary.slice(0, 3000)}\n\n` +
+                   `MITRE Technique: ${alert.analysis.mitre_attack}\n\n` +
+                   `🛡️ RECOMMENDED ACTION:\n${alert.analysis.recommended_action.slice(0, 500)}\n\n` +
+                   `#SecurityAlert #SOC`;
+    
+    await bot.sendMessage(config.telegramChatId, report);
+    res.json({ status: "sent" });
+  } catch (err: any) {
+    res.status(500).json({ error: `Telegram dispatch failed: ${err.message}` });
   }
 });
 
@@ -343,7 +304,6 @@ app.patch("/api/alerts/:id", async (req, res) => {
     if (alertSnap.exists()) {
       const currentAlert = alertSnap.data();
       const updatedAlert = { ...currentAlert, status, analysis };
-      
       await setDoc(alertRef, updatedAlert);
       res.json(updatedAlert);
     } else {
