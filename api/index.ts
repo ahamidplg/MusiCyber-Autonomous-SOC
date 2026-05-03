@@ -2,11 +2,16 @@ import express from "express";
 import TelegramBot from "node-telegram-bot-api";
 import axios from "axios";
 import https from "https";
+import fs from "fs";
+import path from "path";
 
-// --- FIREBASE KHUSUS BACKEND (TANPA AUTH) ---
+// --- FIREBASE KHUSUS BACKEND (TANPA IMPORT DARI SRC) ---
 import { initializeApp } from "firebase/app";
 import { getFirestore, collection, doc, setDoc, getDocs, getDoc, query, orderBy, limit } from "firebase/firestore";
-import firebaseConfig from "../firebase-applet-config.json";
+
+// Baca file config secara aman di Vercel Serverless
+const configPath = path.join(process.cwd(), "firebase-applet-config.json");
+const firebaseConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
 
 // Inisialisasi Firebase App murni untuk database (bisa jalan di Serverless Node.js)
 const firebaseApp = initializeApp(firebaseConfig);
@@ -349,5 +354,4 @@ app.patch("/api/alerts/:id", async (req, res) => {
   }
 });
 
-// EKSPOR APP UNTUK VERCEL SERVERLESS
 export default app;
