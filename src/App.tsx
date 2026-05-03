@@ -27,6 +27,17 @@ import { auth, loginWithGoogle, db } from "./firebase";
 import { onAuthStateChanged, User as FirebaseUser, signOut } from "firebase/auth";
 import { doc, getDoc, setDoc, collection, addDoc, serverTimestamp } from "firebase/firestore";
 
+// Tambahkan blok ini di bawah area import
+axios.interceptors.request.use((config) => {
+  const currentUser = auth.currentUser;
+  if (currentUser) {
+    config.headers['x-user-id'] = currentUser.uid;
+  }
+  return config;
+}, (error) => {
+  return Promise.reject(error);
+});
+
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
