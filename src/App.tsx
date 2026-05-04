@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { 
   Shield, Activity, Search, Bot, RefreshCw, LogOut, Send, 
-  Settings as SettingsIcon, History, Terminal, ExternalLink 
+  Settings as SettingsIcon, History, Terminal 
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import axios from "axios";
@@ -26,7 +26,7 @@ export default function App() {
   const [alerts, setAlerts] = useState<any[]>([]);
   const [selectedAlert, setSelectedAlert] = useState<any | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [logs, setLogs] = useState<string[]>(["[SYSTEM] MusiCyber SOC initialized."]);
+  const [logs, setLogs] = useState<string[]>(["[SYSTEM] SOC Dashboard initialized.", "[NETWORK] Listening for Wazuh alerts..."]);
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState<AppSettings>({
     wazuhUrl: "", wazuhUser: "", wazuhPass: "", 
@@ -71,7 +71,7 @@ export default function App() {
     if (!user) return;
     try {
       await setDoc(doc(db, "users", user.uid, "settings", "main"), settings);
-      addLog("[SUCCESS] Konfigurasi MusiCyber berhasil disinkronkan.");
+      addLog("[SUCCESS] Konfigurasi disinkronkan.");
       setShowSettings(false);
     } catch (err) { addLog("[ERROR] Gagal simpan konfigurasi."); }
   };
@@ -88,17 +88,20 @@ export default function App() {
     try {
       const res = await axios.post("/api/alerts", settings);
       const liveAlerts = Array.isArray(res.data) ? res.data : [];
+      
       if (liveAlerts.length > 0) {
         for (const alert of liveAlerts) {
           const alertRef = doc(db, "wazuh_alerts", alert.id);
           await setDoc(alertRef, { ...alert, userId: user.uid }, { merge: true });
         }
       }
+
       const q = query(collection(db, "wazuh_alerts"), where("userId", "==", user.uid));
       const snap = await getDocs(q);
       const dbAlerts = snap.docs.map(d => d.data())
         .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
         .slice(0, 50);
+      
       setAlerts(dbAlerts);
     } catch (err: any) {
       addLog(`[ERROR] Sync Gagal: ${err.response?.status || "Network Error"}`);
@@ -134,7 +137,7 @@ export default function App() {
     <div className="min-h-screen bg-[#0B0F1A] flex items-center justify-center p-6 grid-bg">
       <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} className="max-w-md w-full bg-[#131B2D] border border-white/10 rounded-2xl p-8 text-center shadow-2xl">
         <Shield className="w-16 h-16 text-blue-600 mx-auto mb-6" />
-        <h1 className="text-2xl font-bold text-white mb-2 uppercase tracking-tighter font-serif">MusiCyber SOC AI</h1>
+        <h1 className="text-2xl font-bold text-white mb-2 uppercase tracking-tighter font-serif">MUSICYBER SOC AI</h1>
         <p className="text-slate-400 text-sm mb-8">Independent Security Intelligence Platform</p>
         <button onClick={loginWithGoogle} className="w-full py-4 bg-white text-black font-bold rounded-xl hover:bg-slate-100 transition-all">Sign in with Google</button>
       </motion.div>
@@ -143,40 +146,78 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#0B0F1A] text-slate-200 flex flex-col font-sans selection:bg-blue-600/30">
+      {/* Header */}
       <header className="h-16 border-b border-white/10 flex items-center justify-between px-6 bg-[#0B0F1A]/80 backdrop-blur-md z-10">
         <div className="flex items-center gap-3">
           <Shield className="text-blue-600" size={24}/>
-          <h1 className="font-bold tracking-widest uppercase">MusiCyber <span className="text-blue-500">SOC AI</span></h1>
+          <h1 className="font-bold tracking-widest uppercase">MUSICYBER <span className="text-blue-500">SOC AI</span></h1>
         </div>
         <div className="flex items-center gap-6">
           <div className="hidden md:flex gap-4 text-[10px] font-mono text-slate-500 uppercase tracking-widest items-center">
-            <span>SIEM: <span className={settings.wazuhUrl ? "text-green-500" : "text-red-500"}>{settings.wazuhUrl ? "READY" : "WAIT"}</span></span>
+            <span>WAZUH: <span className={settings.wazuhUrl ? "text-green-500" : "text-amber-500"}>{settings.wazuhUrl ? "ACTIVE" : "WAIT"}</span></span>
             <div className="w-[1px] h-3 bg-white/10"></div>
-            <span>BOT: <span className={settings.telegramToken ? "text-green-500" : "text-red-500"}>{settings.telegramToken ? "ONLINE" : "OFFLINE"}</span></span>
+            <span>TELEGRAM: <span className={settings.telegramToken ? "text-green-500" : "text-amber-500"}>{settings.telegramToken ? "ONLINE" : "OFFLINE"}</span></span>
             <div className="w-[1px] h-3 bg-white/10"></div>
-            <span>USER: <span className="text-blue-400">{user.email?.split("@")[0]}</span></span>
+            <span>AUTH: <span className="text-blue-400">{user.email?.split("@")[0].toUpperCase()}</span></span>
           </div>
           <SettingsIcon className="cursor-pointer hover:text-blue-400 transition-colors" size={20} onClick={() => setShowSettings(true)} />
           <LogOut className="cursor-pointer hover:text-red-400 transition-colors" size={20} onClick={() => signOut(auth)} />
         </div>
       </header>
 
+      {/* Main Content Layout */}
       <main className="flex-1 grid grid-cols-12 gap-4 p-4 overflow-hidden">
-        <section className="col-span-3 border border-white/10 bg-[#131B2D] rounded-lg flex flex-col overflow-hidden shadow-xl">
-          <div className="p-4 border-b border-white/5 bg-slate-900/50 flex justify-between items-center font-bold">
-            <h3 className="text-[10px] text-slate-500 uppercase tracking-widest">Live Alert Feed</h3>
-            <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse shadow-[0_0_8px_#3b82f6]"></div>
-          </div>
-          <div className="flex-1 overflow-y-auto p-2 space-y-2 custom-scrollbar">
-            {alerts.map(a => (
-              <div key={a.id} onClick={() => setSelectedAlert(a)} className={cn("p-3 rounded border-l-2 cursor-pointer transition-all bg-slate-900/30 border-slate-700 hover:bg-slate-800", selectedAlert?.id === a.id && "border-blue-500 bg-blue-600/10")}>
-                <div className="flex justify-between text-[9px] mb-1 font-mono"><span className="text-slate-500">{a.id}</span><span className="opacity-40">{new Date(a.timestamp).toLocaleTimeString()}</span></div>
-                <p className="text-[11px] font-bold line-clamp-2 leading-tight">{a.rule.description}</p>
+        
+        {/* LEFT COLUMN: Metrics, Assets, Alerts */}
+        <section className="col-span-3 space-y-4 flex flex-col overflow-hidden">
+          {/* Metrics & Assets */}
+          <div className="border border-white/10 bg-[#131B2D] p-4 rounded-lg shrink-0 shadow-xl">
+            <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4">Security Metrics</h3>
+            <div className="grid grid-cols-2 gap-3 mb-6">
+              <div className="p-3 bg-slate-900/50 rounded border border-white/5">
+                <p className="text-[9px] text-slate-500 uppercase mb-1">Total Signals</p>
+                <p className="text-xl font-bold text-white font-mono">{alerts.length}</p>
               </div>
-            ))}
+              <div className="p-3 bg-slate-900/50 rounded border border-white/5">
+                <p className="text-[9px] text-slate-500 uppercase mb-1">AI Verified</p>
+                <p className="text-xl font-bold text-blue-400 font-mono">{alerts.filter(a => a.status === "Analyzed").length}</p>
+              </div>
+            </div>
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Active Assets ({agents.length})</h3>
+              <button className="text-[9px] bg-blue-600/20 text-blue-400 px-2 py-1 rounded hover:bg-blue-600/40 font-bold uppercase transition-colors">+ Deploy</button>
+            </div>
+            <div className="space-y-1 max-h-32 overflow-y-auto custom-scrollbar">
+              {agents.map(ag => (
+                <div key={ag.id} className="flex items-center justify-between p-2 bg-slate-900/50 rounded border border-white/5 text-[10px]">
+                  <div className="flex items-center gap-2"><div className={cn("w-1.5 h-1.5 rounded-full", ag.status === "active" ? "bg-green-500 shadow-[0_0_5px_#22c55e]" : "bg-red-500")} /><span className="text-slate-300 font-mono">{ag.name}</span></div>
+                  <span className="opacity-40 font-mono">{ag.ip}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          
+          {/* Live Alert Feed */}
+          <div className="flex-1 border border-white/10 bg-[#131B2D] rounded-lg flex flex-col overflow-hidden shadow-xl">
+            <div className="p-4 border-b border-white/5 bg-slate-900/50 flex justify-between items-center font-bold">
+              <h3 className="text-[10px] text-slate-500 uppercase tracking-widest">Live Alert Feed</h3>
+              <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse shadow-[0_0_8px_#3b82f6]"></div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-2 space-y-2 custom-scrollbar">
+              {alerts.map(a => (
+                <div key={a.id} onClick={() => setSelectedAlert(a)} className={cn("p-3 rounded border-l-2 cursor-pointer transition-all bg-slate-900/30 border-slate-700 hover:bg-slate-800", selectedAlert?.id === a.id && "border-blue-500 bg-blue-600/10", a.rule.level >= 7 && "bg-red-900/20 border-red-500")}>
+                  <div className="flex justify-between text-[9px] mb-1 font-mono">
+                    <span className={cn("text-slate-500", a.rule.level >= 7 && "text-red-400 font-bold")}>{a.id.substring(0,8)}</span>
+                    <span className="opacity-40">{new Date(a.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
+                  </div>
+                  <p className="text-[11px] font-bold line-clamp-2 leading-tight">{a.rule.description}</p>
+                </div>
+              ))}
+            </div>
           </div>
         </section>
 
+        {/* CENTER COLUMN: Analysis Panel */}
         <section className="col-span-6 border border-white/10 bg-[#131B2D] rounded-lg overflow-hidden flex flex-col relative shadow-2xl">
           {selectedAlert ? (
             <div className="flex-1 flex flex-col p-6 overflow-hidden">
@@ -223,19 +264,28 @@ export default function App() {
           )}
         </section>
 
-        <section className="col-span-3 flex flex-col gap-4 overflow-hidden">
-          <div className="bg-[#131B2D] border border-white/10 rounded-lg p-4 shadow-xl">
-            <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4">Network Assets ({agents.length})</h3>
-            <div className="space-y-2 max-h-40 overflow-y-auto custom-scrollbar">
-              {agents.map(ag => (
-                <div key={ag.id} className="flex items-center justify-between p-2.5 bg-white/5 rounded border border-white/5 text-[10px]">
-                  <div className="flex items-center gap-2"><div className={cn("w-1.5 h-1.5 rounded-full", ag.status === "active" ? "bg-green-500 shadow-[0_0_5px_#22c55e]" : "bg-red-500")} /><span>{ag.name}</span></div>
-                  <span className="opacity-40 font-mono italic">{ag.ip}</span>
-                </div>
-              ))}
+        {/* RIGHT COLUMN: Telegram Intel & Audit Logs */}
+        <section className="col-span-3 space-y-4 flex flex-col overflow-hidden">
+          {/* Telegram Intel */}
+          <div className="flex-1 border border-white/10 bg-[#131B2D] rounded-lg flex flex-col overflow-hidden shadow-xl">
+            <div className="p-4 border-b border-white/5 flex items-center justify-between bg-slate-900/50">
+              <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Telegram Intel</h3>
+              <div className="w-2 h-2 bg-blue-500 rounded-full shadow-[0_0_8px_#3B82F6]"></div>
+            </div>
+            <div className="flex-1 p-4 flex flex-col justify-end gap-3 bg-slate-950/30 overflow-y-auto custom-scrollbar italic font-serif">
+              <div className="bg-slate-800 text-slate-200 text-[11px] p-3 rounded-xl max-w-[90%] self-start border border-white/5">
+                <p className="font-bold text-[9px] text-blue-400 mb-1">SYSTEM_UPDATE</p>
+                Agent is calibrated. Command channel synced.
+              </div>
+            </div>
+            <div className="p-3 border-t border-white/5 bg-slate-900 flex gap-2">
+              <input type="text" placeholder="Agent Prompt..." className="flex-1 bg-slate-800 border border-white/10 rounded-lg px-3 py-2 text-xs text-slate-300 focus:outline-none focus:border-blue-500 transition-colors"/>
+              <button className="p-2 bg-blue-600 rounded-lg text-white hover:bg-blue-500 transition-colors"><Send size={14} /></button>
             </div>
           </div>
-          <div className="flex-1 border border-white/10 bg-[#131B2D] rounded-lg p-4 flex flex-col overflow-hidden shadow-xl">
+
+          {/* Audit Logs */}
+          <div className="h-48 border border-white/10 bg-[#131B2D] p-4 rounded-lg flex flex-col overflow-hidden shadow-xl shrink-0">
             <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Audit Logs</h3>
             <div className="flex-1 overflow-y-auto font-mono text-[9px] text-slate-500 space-y-2 custom-scrollbar">
               {logs.slice().reverse().map((l, i) => <p key={i} className="border-l border-white/10 pl-2 py-0.5">{l}</p>)}
@@ -244,6 +294,7 @@ export default function App() {
         </section>
       </main>
 
+      {/* Settings Modal */}
       <AnimatePresence>
         {showSettings && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-6">
