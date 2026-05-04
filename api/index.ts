@@ -5,10 +5,12 @@ import https from "https";
 const app = express();
 app.use(express.json());
 
-// Agent HTTPS untuk mengabaikan self-signed certificate Wazuh (Standard di On-Premise)
+// Agent HTTPS untuk mengabaikan self-signed certificate Wazuh (Standar On-Premise)
 const agent = new https.Agent({ rejectUnauthorized: false });
 
+// ============================================================================
 // 1. Route: Get Agents dari Wazuh Manager (Port 55000)
+// ============================================================================
 app.post("/api/agents", async (req, res) => {
   const { wazuhUrl, wazuhUser, wazuhPass } = req.body;
   
@@ -38,7 +40,9 @@ app.post("/api/agents", async (req, res) => {
   }
 });
 
+// ============================================================================
 // 2. Route: Get Alerts dari Wazuh Indexer (Port 9200)
+// ============================================================================
 app.post("/api/alerts", async (req, res) => {
   const { wazuhIndexerUrl, wazuhIndexerUser, wazuhIndexerPass } = req.body;
 
@@ -67,7 +71,8 @@ app.post("/api/alerts", async (req, res) => {
       timestamp: hit._source.timestamp,
       rule: hit._source.rule,
       agent: hit._source.agent,
-      raw_log: hit._source.full_log || hit._source.rule.description
+      raw_log: hit._source.full_log || hit._source.rule.description,
+      data: hit._source.data || {} // Pastikan node data ikut terbaca untuk Source IP
     }));
 
     res.json(formattedAlerts);
@@ -77,7 +82,9 @@ app.post("/api/alerts", async (req, res) => {
   }
 });
 
-// 3. Route: Kirim Laporan ke Telegram (Fix 404 Error)
+// ============================================================================
+// 3. Route: Kirim Laporan ke Telegram (Format Clean & Professional)
+// ============================================================================
 app.post("/api/alerts/report", async (req, res) => {
   const { config, alert } = req.body;
   const { telegramToken, telegramChatId } = config;
@@ -86,30 +93,33 @@ app.post("/api/alerts/report", async (req, res) => {
     return res.status(400).json({ error: "Konfigurasi Telegram (Token/ID) kosong." });
   }
 
-  // Format pesan laporan dengan gaya Markdown
-  const message = `
-🚨 *MUSICYBER SOC ALERT* 🚨
---------------------------------
-🆔 *ID:* \`${alert.id}\`
-📝 *Rule:* ${alert.rule.description}
-📊 *Level:* ${alert.rule.level}
-📍 *Source:* ${alert.agent.name} (${alert.agent.ip})
+  // Coba ambil Source IP dari data alert Wazuh, kalau tidak ada gunakan IP Agent
+  const sourceIp = alert.data?.srcip || alert.agent?.ip || "Unknown";
 
-🤖 *AI ANALYSIS:*
-_"${alert.analysis?.summary || "No analysis available"}"_
+  // Format pesan laporan (Plain Text agar terhindar dari parsing error Markdown)
+  const message = `📄 MUSICYBER SECURITY INCIDENT REPORT
 
-🛡️ *RECOMMENDED ACTION:*
+Incident ID: ${alert.id.substring(0,8)}
+Severity: ${alert.analysis?.severity || "High"}
+Target Agent: ${alert.agent?.name || "Unknown"}
+Source IP: ${sourceIp}
+
+🔍 AI ANALYSIS:
+${alert.analysis?.summary || "No analysis available."}
+
+MITRE Technique: ${alert.analysis?.mitre_attack || "T1110"}
+
+🛡️ RECOMMENDED ACTION:
 ${alert.analysis?.recommended_action || "Manual investigation required."}
---------------------------------
-🕒 ${new Date(alert.timestamp).toLocaleString()}
-  `;
+
+#SecurityAlert #SOC`;
 
   try {
     const url = `https://api.telegram.org/bot${telegramToken}/sendMessage`;
     await axios.post(url, {
       chat_id: telegramChatId,
-      text: message,
-      parse_mode: "Markdown"
+      text: message
+      // parse_mode sengaja dihilangkan agar teks AI apapun tetap aman dikirim
     });
     res.json({ status: "success" });
   } catch (err: any) {
@@ -118,4 +128,5 @@ ${alert.analysis?.recommended_action || "Manual investigation required."}
   }
 });
 
+// Export aplikasi untuk di-handle oleh Vercel Serverless
 export default app;
